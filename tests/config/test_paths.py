@@ -9,16 +9,19 @@ def xdg_env(tmp_path):
     # Setup XDG env vars pointing to temp dir
     data_home = tmp_path / "share"
     cache_home = tmp_path / "cache"
+    config_home = tmp_path / "config"
     data_home.mkdir()
     cache_home.mkdir()
+    config_home.mkdir()
 
     env_vars = {
         "XDG_DATA_HOME": str(data_home),
         "XDG_CACHE_HOME": str(cache_home),
+        "XDG_CONFIG_HOME": str(config_home),
     }
 
     with patch.dict(os.environ, env_vars):
-        yield data_home, cache_home
+        yield data_home, cache_home, config_home
 
 @pytest.fixture
 def mock_project_root(tmp_path):
@@ -32,10 +35,22 @@ def test_resolve_security_identifiers_path_user_provided():
     path = paths.resolve_security_identifiers_path("/custom/path.csv")
     assert path == Path("/custom/path.csv")
 
-def test_resolve_security_identifiers_path_xdg(xdg_env):
-    data_home, _ = xdg_env
+def test_resolve_security_identifiers_path_xdg_config(xdg_env):
+    data_home, _, config_home = xdg_env
 
-    # Create file in XDG data home
+    # Create file in XDG CONFIG home (primary)
+    app_config = config_home / "opensteuerauszug"
+    app_config.mkdir(parents=True)
+    csv_file = app_config / "security_identifiers.csv"
+    csv_file.touch()
+
+    resolved = paths.resolve_security_identifiers_path()
+    assert resolved == csv_file
+
+def test_resolve_security_identifiers_path_xdg_data_fallback(xdg_env):
+    data_home, _, config_home = xdg_env
+
+    # Create file in XDG DATA home (fallback)
     app_data = data_home / "opensteuerauszug"
     app_data.mkdir(parents=True)
     csv_file = app_data / "security_identifiers.csv"
@@ -45,7 +60,7 @@ def test_resolve_security_identifiers_path_xdg(xdg_env):
     assert resolved == csv_file
 
 def test_resolve_security_identifiers_path_fallback_local(xdg_env, mock_project_root):
-    # XDG file missing
+    # XDG files missing
 
     # Create file in project data dir
     data_dir = mock_project_root / "data"
@@ -70,13 +85,9 @@ def test_resolve_kursliste_dirs_user_provided(tmp_path):
     assert resolved == [user_dir]
 
 def test_resolve_kursliste_dirs_all_exist(xdg_env, mock_project_root):
-    data_home, cache_home = xdg_env
+    data_home, cache_home, config_home = xdg_env
 
-    # Create XDG Cache dir
-    cache_kursliste = cache_home / "opensteuerauszug" / "kursliste"
-    cache_kursliste.mkdir(parents=True)
-
-    # Create XDG Data dir
+    # Create XDG Data dir (Now priority)
     data_kursliste = data_home / "opensteuerauszug" / "kursliste"
     data_kursliste.mkdir(parents=True)
 
@@ -94,13 +105,13 @@ def test_resolve_kursliste_dirs_all_exist(xdg_env, mock_project_root):
     try:
         resolved = paths.resolve_kursliste_dirs()
 
-        assert len(resolved) == 4
-        assert resolved[0] == cache_kursliste
-        assert resolved[1] == data_kursliste
-        assert resolved[2] == Path("data/kursliste")
-        # resolved[2] is relative, so check resolve() matches
-        assert resolved[2].resolve() == (cwd_dir / "data" / "kursliste").resolve()
-        assert resolved[3] == project_kursliste
+        # Expected order: XDG Data -> CWD -> Project Root
+        assert len(resolved) == 3
+        assert resolved[0] == data_kursliste
+        assert resolved[1] == Path("data/kursliste")
+        # resolved[1] is relative, so check resolve() matches
+        assert resolved[1].resolve() == (cwd_dir / "data" / "kursliste").resolve()
+        assert resolved[2] == project_kursliste
     finally:
         os.chdir(original_cwd)
 
@@ -141,5 +152,57 @@ def test_resolve_kursliste_dirs_deduplication(xdg_env, mock_project_root):
         # So resolved list should have only 1 entry (assuming XDG don't exist)
         assert len(resolved) == 1
         assert resolved[0] == Path("data/kursliste")
+    finally:
+        os.chdir(original_cwd)
+
+def test_resolve_config_file_user_provided():
+    path = paths.resolve_config_file(Path("/custom/config.toml"))
+    assert path == Path("/custom/config.toml")
+
+def test_resolve_config_file_cwd_exists(xdg_env, tmp_path):
+    cwd_dir = tmp_path / "cwd"
+    cwd_dir.mkdir()
+    config_file = cwd_dir / "config.toml"
+    config_file.touch()
+
+    original_cwd = os.getcwd()
+    os.chdir(cwd_dir)
+    try:
+        resolved = paths.resolve_config_file()
+        assert resolved == Path("config.toml")
+    finally:
+        os.chdir(original_cwd)
+
+def test_resolve_config_file_xdg_exists(xdg_env, tmp_path):
+    _, _, config_home = xdg_env
+
+    # Create XDG config
+    app_config = config_home / "opensteuerauszug"
+    app_config.mkdir(parents=True)
+    xdg_file = app_config / "config.toml"
+    xdg_file.touch()
+
+    # Ensure CWD config does not exist
+    cwd_dir = tmp_path / "clean_cwd"
+    cwd_dir.mkdir()
+
+    original_cwd = os.getcwd()
+    os.chdir(cwd_dir)
+    try:
+        resolved = paths.resolve_config_file()
+        assert resolved == xdg_file
+    finally:
+        os.chdir(original_cwd)
+
+def test_resolve_config_file_default(xdg_env, tmp_path):
+    # Neither exists, return default relative path
+    cwd_dir = tmp_path / "clean_cwd"
+    cwd_dir.mkdir()
+
+    original_cwd = os.getcwd()
+    os.chdir(cwd_dir)
+    try:
+        resolved = paths.resolve_config_file()
+        assert resolved == Path("config.toml")
     finally:
         os.chdir(original_cwd)

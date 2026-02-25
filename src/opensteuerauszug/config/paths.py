@@ -10,6 +10,10 @@ def get_xdg_cache_home() -> Path:
     """Returns the XDG_CACHE_HOME path."""
     return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
 
+def get_xdg_config_home() -> Path:
+    """Returns the XDG_CONFIG_HOME path."""
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+
 def get_project_root() -> Path:
     """Returns the root directory of the project."""
     # Based on assumption that this file is in src/opensteuerauszug/config/paths.py
@@ -23,17 +27,23 @@ def get_project_root() -> Path:
 def resolve_security_identifiers_path(user_provided_path: str = None) -> Path:
     """
     Resolves the path to the security identifiers CSV file.
-    Prioritizes user provided path, then XDG_DATA_HOME, then local project data.
+    Prioritizes user provided path, then XDG_CONFIG_HOME, then local project data.
     """
     if user_provided_path:
         return Path(user_provided_path)
 
-    # 1. XDG Data
-    xdg_path = get_xdg_data_home() / "opensteuerauszug" / "security_identifiers.csv"
-    if xdg_path.exists():
-        return xdg_path
+    # 1. XDG Config
+    xdg_config_path = get_xdg_config_home() / "opensteuerauszug" / "security_identifiers.csv"
+    if xdg_config_path.exists():
+        return xdg_config_path
 
-    # 2. Local fallback (Project Root)
+    # 2. XDG Data (Backward compatibility/fallback if user put it there based on previous logic)
+    # Although not strictly required, it's good practice during transition or if user prefers data dir.
+    xdg_data_path = get_xdg_data_home() / "opensteuerauszug" / "security_identifiers.csv"
+    if xdg_data_path.exists():
+        return xdg_data_path
+
+    # 3. Local fallback (Project Root)
     # Existing behavior was defaulting to project_root/data/security_identifiers.csv
     local_path = get_project_root() / "data" / "security_identifiers.csv"
     return local_path
@@ -43,10 +53,9 @@ def resolve_kursliste_dirs(user_provided_dir: Path = None) -> list[Path]:
     Resolves the directories to search for Kursliste files.
     If user_provided_dir is given, only that directory is returned.
     Otherwise, returns a list of existing default directories in priority order:
-    1. XDG Cache (for SQLite)
-    2. XDG Data (for XML)
-    3. CWD data/kursliste
-    4. Project Root data/kursliste
+    1. XDG Data (for XML and SQLite)
+    2. CWD data/kursliste
+    3. Project Root data/kursliste
     """
     if user_provided_dir:
         # Return provided directory even if it doesn't exist, to let caller handle error
@@ -54,22 +63,17 @@ def resolve_kursliste_dirs(user_provided_dir: Path = None) -> list[Path]:
 
     dirs = []
 
-    # 1. XDG Cache (SQLite)
-    xdg_cache_kursliste = get_xdg_cache_home() / "opensteuerauszug" / "kursliste"
-    if xdg_cache_kursliste.exists():
-        dirs.append(xdg_cache_kursliste)
-
-    # 2. XDG Data (XML)
+    # 1. XDG Data (XML & SQLite)
     xdg_data_kursliste = get_xdg_data_home() / "opensteuerauszug" / "kursliste"
     if xdg_data_kursliste.exists():
         dirs.append(xdg_data_kursliste)
 
-    # 3. Local fallback (cwd/data/kursliste, matching existing default behavior)
+    # 2. Local fallback (cwd/data/kursliste, matching existing default behavior)
     cwd_kursliste = Path("data/kursliste")
     if cwd_kursliste.exists():
         dirs.append(cwd_kursliste)
 
-    # 4. Project Root fallback
+    # 3. Project Root fallback
     project_kursliste = get_project_root() / "data" / "kursliste"
 
     # Check if we should add project_kursliste
@@ -79,3 +83,25 @@ def resolve_kursliste_dirs(user_provided_dir: Path = None) -> list[Path]:
             dirs.append(project_kursliste)
 
     return dirs
+
+def resolve_config_file(user_provided_path: Path = None) -> Path:
+    """
+    Resolves the configuration file path.
+    Prioritizes user provided path, then CWD config.toml, then XDG_CONFIG_HOME config.toml.
+    Defaults to 'config.toml' in CWD if nothing found (to let ConfigManager handle missing file).
+    """
+    if user_provided_path:
+        return user_provided_path
+
+    # 1. CWD config.toml (Existing default behavior)
+    cwd_config = Path("config.toml")
+    if cwd_config.exists():
+        return cwd_config
+
+    # 2. XDG Config
+    xdg_config = get_xdg_config_home() / "opensteuerauszug" / "config.toml"
+    if xdg_config.exists():
+        return xdg_config
+
+    # 3. Default (for error handling in ConfigManager)
+    return cwd_config

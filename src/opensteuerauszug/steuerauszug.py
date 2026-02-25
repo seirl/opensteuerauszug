@@ -10,7 +10,7 @@ from pypdf import PdfReader, PdfWriter
 from opensteuerauszug.config.models import SchwabAccountSettings, IbkrAccountSettings, GeneralSettings # Added GeneralSettings
 import os # For path construction
 from .core.identifier_loader import SecurityIdentifierMapLoader
-from opensteuerauszug.config.paths import resolve_security_identifiers_path, resolve_kursliste_dirs, get_xdg_data_home
+from opensteuerauszug.config.paths import resolve_security_identifiers_path, resolve_kursliste_dirs, get_xdg_data_home, resolve_config_file
 
 # Use the generated eCH-0196 model
 from .model.ech0196 import TaxStatement, Client, ClientNumber, Institution
@@ -85,7 +85,7 @@ def main(
     filter_to_period_flag: bool = typer.Option(True, "--filter-to-period/--no-filter-to-period", help="Filter transactions and stock events to the tax period (with closing balances). Defaults to enabled."),
     tax_calculation_level: TaxCalculationLevel = typer.Option(TaxCalculationLevel.KURSLISTE, "--tax-calculation-level", help="Specify the level of detail for tax value calculations."),
     log_level: LogLevel = typer.Option(LogLevel.INFO, "--log-level", help="Set the log level for console output."),
-    config_file: Path = typer.Option("config.toml", "--config", "-c", help="Path to the configuration TOML file."),
+    config_file: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to the configuration TOML file. Defaults to 'config.toml' in CWD or XDG config."),
     broker_name: Optional[str] = typer.Option(None, "--broker", help="Broker name (e.g., 'schwab') from config.toml to use for this run."),
     override_configs: List[str] = typer.Option(None, "--set", help="Override configuration settings using path.to.key=value format. Can be used multiple times."),
     kursliste_dir: Optional[Path] = typer.Option(None, "--kursliste-dir", help="Directory containing Kursliste XML files for exchange rate information. Defaults to checking XDG paths then 'data/kursliste'."),
@@ -170,7 +170,11 @@ def main(
     # --- Configuration Loading ---
     all_schwab_account_settings_models: List[SchwabAccountSettings] = []
     all_ibkr_account_settings_models: List[IbkrAccountSettings] = [] # New list for IBKR
-    config_manager = ConfigManager(config_file_path=str(config_file))
+
+    resolved_config_path = resolve_config_file(config_file)
+    logger.debug(f"Resolved configuration file path: {resolved_config_path}")
+
+    config_manager = ConfigManager(config_file_path=str(resolved_config_path))
     
     # Extract general configuration settings for CleanupCalculator
     general_config_settings: Optional[GeneralSettings] = None
