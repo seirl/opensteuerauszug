@@ -3,15 +3,16 @@ import subprocess
 import sqlite3
 from pathlib import Path
 from decimal import Decimal
-import json # Added for model_validate_json
-from typing import Dict, Type # Added for type map
+import json
+from typing import Dict, Type
+import sys
+import os
 
 # Import Pydantic models needed for deserialization and type map
 from opensteuerauszug.model.kursliste import (
     Security, Share, Bond, Fund, Derivative, CoinBullion, CurrencyNote, LiborSwap,
     SecurityTypeESTV
 )
-
 
 # Updated Sample XML with a Fund and consistent structure
 SAMPLE_XML_CONTENT = """<?xml version="1.0" encoding="UTF-8"?>
@@ -80,7 +81,11 @@ def test_convert_kursliste_xml_to_sqlite(tmp_path):
         str(output_db_file)
     ]
     
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    # Ensure PYTHONPATH includes src so the script can find the package
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(PROJECT_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False, env=env)
     assert result.returncode == 0, f"Script execution failed: {result.stderr}"
     assert output_db_file.exists(), "SQLite DB file was not created."
 
@@ -248,7 +253,3 @@ def test_convert_kursliste_xml_to_sqlite(tmp_path):
     assert usd_ye["tax_year"] == expected_tax_year
 
     conn.close()
-    
-    # Clean up the sample XML file explicitly if not using tmp_path features that auto-cleanup
-    # sample_xml_file.unlink() # tmp_path should handle this
-    # output_db_file.unlink() # tmp_path should handle this
