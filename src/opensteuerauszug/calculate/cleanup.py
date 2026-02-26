@@ -5,7 +5,11 @@ from typing import List, Optional, Dict, Any, cast, get_args # Added get_args im
 # Removed pandas import
 from decimal import Decimal
 import logging
-from opensteuerauszug.model.ech0196 import SecurityTaxValue, TaxStatement, SecurityStock, BankAccountPayment, SecurityPayment, Client, ClientNumber, CantonAbbreviation
+from opensteuerauszug.model.ech0196 import (
+    SecurityTaxValue, TaxStatement, SecurityStock, BankAccountPayment, SecurityPayment,
+    Client, ClientNumber, CantonAbbreviation, LiabilityAccount, LiabilityAccountTaxValue,
+    ListOfLiabilities, BankAccountName, CountryIdISO2Type, CurrencyId
+)
 from opensteuerauszug.model.critical_warning import CriticalWarning, CriticalWarningCategory
 from opensteuerauszug.util.sorting import find_index_of_date, sort_security_stocks, sort_payments, sort_security_payments
 from opensteuerauszug.config.models import GeneralSettings
@@ -30,13 +34,14 @@ class CleanupCalculator:
                  importer_name: str, # Added importer_name parameter
                  identifier_map: Optional[Dict[str, Dict[str, Any]]] = None,
                  enable_filtering: bool = True,
-                 
+                 override_org_nr: Optional[str] = None,
                  config_settings: Optional[GeneralSettings] = None):
         self.period_from = period_from
         self.period_to = period_to
         self.importer_name = importer_name # Store importer_name
         self.identifier_map = identifier_map
         self.enable_filtering = enable_filtering
+        self.override_org_nr = override_org_nr
         self.config_settings = config_settings
         self.modified_fields: List[str] = []
 
@@ -78,7 +83,7 @@ class CleanupCalculator:
 
         # 2. Clearing Number (5 digits, numeric)
         # Use the existing compute_org_nr function which generates fake clearing numbers
-        clearing_number = compute_org_nr(statement, override_org_nr=None)
+        clearing_number = compute_org_nr(statement, override_org_nr=self.override_org_nr)
         # clearing_number is already a 5-digit string
 
         # 3. Customer ID (14 chars, alphanumeric): prefix normalized importer name then account id
@@ -228,6 +233,8 @@ class CleanupCalculator:
             #    # statement.id will remain None, allowing process to potentially continue
 
         # Process Bank Accounts
+        liabilities_to_add: List[LiabilityAccount] = []
+
         if statement.listOfBankAccounts and statement.listOfBankAccounts.bankAccount:
             for idx, bank_account in enumerate(statement.listOfBankAccounts.bankAccount):
                 account_id = bank_account.bankAccountNumber or bank_account.iban or f"BankAccount_{idx+1}"
@@ -252,6 +259,50 @@ class CleanupCalculator:
                         bank_account.closingDate = None
                         self.modified_fields.append(f"{account_id}.closingDate (cleared)")
 
+                # Handle negative bank account balance
+                if bank_account.taxValue and bank_account.taxValue.balance is not None:
+                    if bank_account.taxValue.balance < 0:
+                        negative_balance = abs(bank_account.taxValue.balance)
+                        negative_value = abs(bank_account.taxValue.value) if bank_account.taxValue.value is not None else negative_balance
+
+                        logger.info(
+                            f"  BankAccount {account_id}: Found negative balance {bank_account.taxValue.balance}. "
+                            f"Creating liability account and setting balance to 0."
+                        )
+
+                        liability_name = str(bank_account.bankAccountName) or account_id
+                        # Must stay under 40 characaters.
+                        if len(liability_name) < (40 - 16):
+                            liability_name = f"{liability_name} (Negativ Saldo)"
+
+                        # Create liability account from the negative bank account
+                        liability_account = LiabilityAccount(
+                            iban=bank_account.iban,
+                            bankAccountNumber=bank_account.bankAccountNumber,
+                            bankAccountName=BankAccountName(liability_name),
+                            bankAccountCountry=bank_account.bankAccountCountry or CountryIdISO2Type("CH"),
+                            bankAccountCurrency=bank_account.bankAccountCurrency or CurrencyId("CHF"),
+                            openingDate=bank_account.openingDate,
+                            closingDate=bank_account.closingDate,
+                            totalTaxValue=negative_value,
+                            totalGrossRevenueB=Decimal("0"),
+                            taxValue=LiabilityAccountTaxValue(
+                                referenceDate=bank_account.taxValue.referenceDate,
+                                name=bank_account.taxValue.name,
+                                balanceCurrency=bank_account.taxValue.balanceCurrency,
+                                balance=negative_balance,
+                                exchangeRate=bank_account.taxValue.exchangeRate,
+                                value=negative_value
+                            )
+                        )
+                        liabilities_to_add.append(liability_account)
+                        self.modified_fields.append(f"{account_id}.taxValue (converted to liability)")
+
+                        # Set bank account balance to 0
+                        bank_account.taxValue.balance = Decimal("0")
+                        bank_account.taxValue.value = Decimal("0")
+                        self.modified_fields.append(f"{account_id}.taxValue.balance (set to 0)")
+
                 if bank_account.payment:
                     original_payment_count = len(bank_account.payment)
 
@@ -275,6 +326,17 @@ class CleanupCalculator:
                     # No log if filtering is disabled globally
         else:
             logger.info("No bank accounts found to process.")
+
+        # Add any liabilities created from negative bank account balances
+        if liabilities_to_add:
+            if statement.listOfLiabilities is None:
+                statement.listOfLiabilities = ListOfLiabilities()
+                logger.info(f"Created listOfLiabilities to hold {len(liabilities_to_add)} liability account(s) from negative bank balances.")
+
+            # Add the new liabilities
+            statement.listOfLiabilities.liabilityAccount.extend(liabilities_to_add)
+            logger.info(f"Added {len(liabilities_to_add)} liability account(s) from negative bank account balances.")
+            self.modified_fields.append(f"listOfLiabilities (added {len(liabilities_to_add)} accounts from negative balances)")
 
         # Process Securities Accounts
         if statement.listOfSecurities and statement.listOfSecurities.depot:
@@ -489,4 +551,3 @@ class CleanupCalculator:
             logger.info("Cleanup calculation finished. No data was modified.") # Adjusted log
         return statement
 
-    

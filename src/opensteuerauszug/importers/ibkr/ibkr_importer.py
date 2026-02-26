@@ -417,7 +417,7 @@ class IbkrImporter:
                         referenceDate=trade_date,
                         mutation=True,
                         quantity=quantity,
-                        unitPrice=trade_price,
+                        unitPrice=trade_price if trade_price != Decimal(0) else None,
                         name=buy_sell.value,
                         orderId=trade.ibOrderID,
                         balanceCurrency=currency,
@@ -782,6 +782,10 @@ class IbkrImporter:
                             logger.warning(f"Fees paid for {description} are ignored for statement.")
                             continue
                         elif tx_type in [ibflex.CashAction.BROKERINTRCVD]:
+                            # Tax relevant event. Fall through to create a bank payment.
+                            pass
+                        elif tx_type in [ibflex.CashAction.WHTAX]:
+                            # Withholding tax not linked to a security (e.g. yield enhancement).
                             # Tax relevant event. Fall through to create a bank payment.
                             pass
                         else:

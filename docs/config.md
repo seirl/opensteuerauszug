@@ -6,9 +6,9 @@ This document describes how to configure the OpenSteuerAuszug application using 
 
 The configuration file is **optional**. To set it up:
 
-1. Copy the template file: `cp config.template.toml config.toml`
-2. Edit `config.toml` with your personal information (canton, full name, account numbers, etc.)
-3. The `config.toml` file is ignored by git to protect your personal data
+1. Create the config directory (recommended): `mkdir -p ~/.config/opensteuerauszug`
+2. Copy the template file: `cp config.template.toml ~/.config/opensteuerauszug/config.toml` (or to `config.toml` in your current directory)
+3. Edit the config file with your personal information (canton, full name, account numbers, etc.)
 
 **Note:** If `config.toml` is not present, the application will still run but will use empty configuration. You may need to provide required settings via command-line arguments.
 
@@ -405,10 +405,14 @@ The CSV file must adhere to the following format:
     *   `valor`: The Valor number to be populated if the security is missing one. This field can be left empty if you only want to provide an ISIN. If provided, it must be a valid integer.
 
 ### File Location and Configuration
-By default, the application looks for this file at `data/security_identifiers.csv` (relative to the project root). However, you can specify a custom path using the command-line argument:
+By default, the application looks for this file in your configuration directory:
+*   `~/.config/opensteuerauszug/security_identifiers.csv` (Recommended)
+*   `data/security_identifiers.csv` (Local fallback)
+
+You can also specify a custom path using the command-line argument:
 `--identifiers-csv-path /path/to/your/identifiers.csv`
 
-If this argument is not provided, the default path will be used.
+If this argument is not provided, the default locations are checked in order.
 
 ### Example CSV Content
 
@@ -423,7 +427,7 @@ Another Security Name Without Valor,CH9876543210,
 ### Optional File
 
 This `security_identifiers.csv` file is **optional**.
-*   If the file is not found at the specified location (`data/security_identifiers.csv`), a warning message will be logged.
+*   If the file is not found at any of the standard locations, a warning message will be logged.
 *   The enrichment step will be skipped, and the program will continue to operate normally with the data as it was originally provided.
 
 This feature is particularly useful when your bank's export files do not consistently provide ISIN or Valor numbers for all securities, allowing you to maintain a supplementary list for complete data records.

@@ -5,13 +5,15 @@ from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 from datetime import date, datetime
+from pypdf import PdfReader, PdfWriter
 
 from opensteuerauszug.config.models import SchwabAccountSettings, IbkrAccountSettings, GeneralSettings # Added GeneralSettings
 import os # For path construction
 from .core.identifier_loader import SecurityIdentifierMapLoader
+from opensteuerauszug.config.paths import resolve_security_identifiers_path, resolve_kursliste_dirs, get_xdg_data_home, resolve_config_file
 
 # Use the generated eCH-0196 model
-from .model.ech0196 import TaxStatement
+from .model.ech0196 import TaxStatement, Client, ClientNumber, Institution
 # Import the rendering functionality
 from .render.render import render_tax_statement
 # Import calculation framework
@@ -77,18 +79,20 @@ def main(
     identifiers_csv_path_opt: Optional[str] = typer.Option(
         None,
         "--identifiers-csv-path",
-        help="Path to the security identifiers CSV file (e.g., data/my_identifiers.csv). If not provided, defaults to 'data/security_identifiers.csv' relative to the project root."
+        help="Path to the security identifiers CSV file. Defaults to checking XDG paths then 'data/security_identifiers.csv'."
     ),
     strict_consistency_flag: bool = typer.Option(True, "--strict-consistency/--no-strict-consistency", help="Enable/disable strict consistency checks in importers (e.g., Schwab). Defaults to strict."),
     filter_to_period_flag: bool = typer.Option(True, "--filter-to-period/--no-filter-to-period", help="Filter transactions and stock events to the tax period (with closing balances). Defaults to enabled."),
     tax_calculation_level: TaxCalculationLevel = typer.Option(TaxCalculationLevel.KURSLISTE, "--tax-calculation-level", help="Specify the level of detail for tax value calculations."),
     log_level: LogLevel = typer.Option(LogLevel.INFO, "--log-level", help="Set the log level for console output."),
-    config_file: Path = typer.Option("config.toml", "--config", "-c", help="Path to the configuration TOML file."),
+    config_file: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to the configuration TOML file. Defaults to 'config.toml' in CWD or XDG config."),
     broker_name: Optional[str] = typer.Option(None, "--broker", help="Broker name (e.g., 'schwab') from config.toml to use for this run."),
     override_configs: List[str] = typer.Option(None, "--set", help="Override configuration settings using path.to.key=value format. Can be used multiple times."),
-    kursliste_dir: Path = typer.Option(Path("data/kursliste"), "--kursliste-dir", help="Directory containing Kursliste XML files for exchange rate information. Defaults to 'data/kursliste'."),
+    kursliste_dir: Optional[Path] = typer.Option(None, "--kursliste-dir", help="Directory containing Kursliste XML files for exchange rate information. Defaults to checking XDG paths then 'data/kursliste'."),
     org_nr: Optional[str] = typer.Option(None, "--org-nr", help="Override the organization number used in barcodes (5-digit number)"),
     payment_reconciliation: bool = typer.Option(True, "--payment-reconciliation/--no-payment-reconciliation", help="Run optional payment reconciliation between Kursliste and broker evidence."),
+    pre_amble: Optional[List[Path]] = typer.Option(None, "--pre-amble", help="List of PDF documents to add before the main steuerauszug."),
+    post_amble: Optional[List[Path]] = typer.Option(None, "--post-amble", help="List of PDF documents to add after the main steuerauszug."),
 ):
     """Processes financial data to generate a Swiss tax statement (Steuerauszug)."""
     logging.basicConfig(level=log_level.value)
@@ -166,7 +170,11 @@ def main(
     # --- Configuration Loading ---
     all_schwab_account_settings_models: List[SchwabAccountSettings] = []
     all_ibkr_account_settings_models: List[IbkrAccountSettings] = [] # New list for IBKR
-    config_manager = ConfigManager(config_file_path=str(config_file))
+
+    resolved_config_path = resolve_config_file(config_file)
+    logger.debug(f"Resolved configuration file path: {resolved_config_path}")
+
+    config_manager = ConfigManager(config_file_path=str(resolved_config_path))
     
     # Extract general configuration settings for CleanupCalculator
     general_config_settings: Optional[GeneralSettings] = None
@@ -344,26 +352,25 @@ def main(
 
             elif importer_type == ImporterType.NONE and not raw_import:
                 print("No specific importer selected, creating an empty TaxStatement for further processing.")
-                statement = TaxStatement(minorVersion=2) # type: ignore
+                # Create a minimal valid statement with required elements per eCH-0196 XSD
+                statement = TaxStatement(
+                    minorVersion=22,
+                    institution=Institution(name=""),
+                    client=[Client(clientNumber=ClientNumber(""))]
+                )
             else:
                 # This case implies an importer was specified but isn't handled yet,
                 # or raw_import is true (which is handled before this block).
                 # If more importers are added, they need to be handled here.
                 print(f"Importer '{importer_type.value}' not yet implemented or not applicable. Creating empty TaxStatement.")
-                statement = TaxStatement(minorVersion=2) # type: ignore
+                # Create a minimal valid statement with required elements per eCH-0196 XSD
+                statement = TaxStatement(
+                    minorVersion=22,
+                    institution=Institution(name=""),
+                    client=[Client(clientNumber=ClientNumber(""))]
+                )
 
             print(f"Import successful." )
-            dump_debug_model(current_phase.value, statement)
-
-        # ... (rest of the phases: VALIDATE, CALCULATE, VERIFY, RENDER remain the same) ...
-        if Phase.VALIDATE in run_phases:
-            current_phase = Phase.VALIDATE
-            print(f"Phase: {current_phase.value}")
-            if not statement:
-                 raise ValueError("TaxStatement model not loaded. Cannot run validate phase.")
-            # Call the model's validate method
-            statement.validate_model()
-            print(f"Validation successful (placeholder check)." )
             dump_debug_model(current_phase.value, statement)
 
         if Phase.CALCULATE in run_phases:
@@ -375,20 +382,15 @@ def main(
             if not parsed_period_from or not parsed_period_to:
                 raise ValueError("Both --period-from and --period-to must be specified for the calculate phase.")
             
-            effective_identifiers_csv_path: str
-            if identifiers_csv_path_opt is None:
-                cli_py_file_path = os.path.abspath(__file__)
-                src_opensteuerauszug_dir = os.path.dirname(cli_py_file_path)
-                src_dir = os.path.dirname(src_opensteuerauszug_dir)
-                project_root_dir = os.path.dirname(src_dir)
-                effective_identifiers_csv_path = os.path.join(project_root_dir, "data", "security_identifiers.csv")
-                logger.debug(f"Using default security identifiers CSV path: {effective_identifiers_csv_path}")
-            else:
-                effective_identifiers_csv_path = identifiers_csv_path_opt
-                logger.debug(f"Using user-provided security identifiers CSV path: {effective_identifiers_csv_path}")
+            effective_identifiers_csv_path: Path
+            if identifiers_csv_path_opt:
+                logger.debug(f"Using user-provided security identifiers CSV path: {identifiers_csv_path_opt}")
+
+            effective_identifiers_csv_path = resolve_security_identifiers_path(identifiers_csv_path_opt)
+            logger.debug(f"Resolved security identifiers CSV path: {effective_identifiers_csv_path}")
 
             print(f"Attempting to load security identifiers from: {effective_identifiers_csv_path}")
-            identifier_loader = SecurityIdentifierMapLoader(effective_identifiers_csv_path)
+            identifier_loader = SecurityIdentifierMapLoader(str(effective_identifiers_csv_path))
             security_identifier_map = identifier_loader.load_map()
 
             if security_identifier_map:
@@ -403,6 +405,7 @@ def main(
                 identifier_map=security_identifier_map,
                 enable_filtering=filter_to_period_flag,
                 importer_name=importer_type.value,
+                override_org_nr=org_nr,
                 config_settings=general_config_settings
             )
             statement = cleanup_calculator.calculate(statement)
@@ -410,20 +413,53 @@ def main(
             dump_debug_model(current_phase.value + "_after_cleanup", statement) # Optional intermediate dump
 
             exchange_rate_provider: ExchangeRateProvider
-            print(f"Using KurslisteExchangeRateProvider with directory: {kursliste_dir}")
+
+            kursliste_dirs_to_load = resolve_kursliste_dirs(kursliste_dir)
+            print(f"Using KurslisteExchangeRateProvider with directories: {[str(d) for d in kursliste_dirs_to_load]}")
+
+            if not kursliste_dirs_to_load:
+                 print(f"Warning: No Kursliste directories found/configured.")
+
+            # Calculate preferred directory for error message
+            preferred_dir_for_error = kursliste_dir
+            if not preferred_dir_for_error:
+                # Default to XDG Data
+                preferred_dir_for_error = get_xdg_data_home() / "opensteuerauszug" / "kursliste"
+
             try:
-                if not kursliste_dir.exists():
-                    print(f"Warning: Kursliste directory {kursliste_dir} does not exist")
                 kursliste_manager = KurslisteManager()
-                kursliste_manager.load_directory(kursliste_dir)
-                
+                # Ensure the preferred directory is in the list of dirs to load if it exists
+                # logic in resolve_kursliste_dirs already handles this for XDG and local data.
+                # If the user strictly provided kursliste_dir, it's there.
+
+                for k_dir in kursliste_dirs_to_load:
+                    if not k_dir.exists():
+                        # Don't warn for default XDG paths that don't exist yet, as it's noisy on fresh install
+                        if k_dir != get_xdg_data_home() / "opensteuerauszug" / "kursliste":
+                             print(f"Warning: Kursliste directory {k_dir} does not exist (skipping)")
+                        continue
+                    print(f"Loading Kursliste data from: {k_dir}")
+                    kursliste_manager.load_directory(k_dir)
+
                 # Verify that Kursliste data exists for the required tax year
                 required_tax_year = parsed_period_to.year
-                kursliste_manager.ensure_year_available(required_tax_year, kursliste_dir)
+                kursliste_manager.ensure_year_available(required_tax_year, preferred_dir_for_error)
                 
                 exchange_rate_provider = KurslisteExchangeRateProvider(kursliste_manager)
             except Exception as e:
-                raise ValueError(f"Failed to initialize KurslisteExchangeRateProvider with directory {kursliste_dir}: {e}")
+                # If ensuring year available failed, it means data is missing.
+                # The ensure_year_available raises ValueError with a helpful message.
+                # We catch general Exception here which might mask it or wrap it.
+                # But typically ensure_year_available raises ValueError.
+                # The message should guide the user.
+
+                # Check if it was indeed the ensure_year_available that failed
+                if "Kursliste data for tax year" in str(e):
+                     # Re-raise nicely
+                     raise e
+
+                checked_dirs = ", ".join([str(d) for d in kursliste_dirs_to_load])
+                raise ValueError(f"Failed to initialize KurslisteExchangeRateProvider with directories {checked_dirs}: {e}")
             
             tax_value_calculator: Optional[MinimalTaxValueCalculator] = None
             calculator_name = ""
@@ -469,21 +505,43 @@ def main(
             
             print(f"Verifying with tax calculation level: {tax_calculation_level.value}...")
             exchange_rate_provider_verify: ExchangeRateProvider
-            print(f"Using KurslisteExchangeRateProvider with directory: {kursliste_dir} for verification")
+
+            kursliste_dirs_verify = resolve_kursliste_dirs(kursliste_dir)
+            print(f"Using KurslisteExchangeRateProvider with directories: {[str(d) for d in kursliste_dirs_verify]} for verification")
+
+            # Calculate preferred directory for error message
+            preferred_dir_for_error_verify = kursliste_dir
+            if not preferred_dir_for_error_verify:
+                # Default to XDG Data
+                preferred_dir_for_error_verify = get_xdg_data_home() / "opensteuerauszug" / "kursliste"
+
             try:
-                if not kursliste_dir.exists():
-                    print(f"Warning: Kursliste directory {kursliste_dir} does not exist for verification.")
-                    kursliste_dir.mkdir(parents=True, exist_ok=True)
                 kursliste_manager_verify = KurslisteManager()
-                kursliste_manager_verify.load_directory(kursliste_dir)
+                for k_dir in kursliste_dirs_verify:
+                    if not k_dir.exists():
+                         # In verify mode, we might want to create it if it's the output dir?
+                         # But here we are reading data.
+                         # The original code did: kursliste_dir.mkdir(parents=True, exist_ok=True)
+                         # This implies it might be used for output? But ExchangeRateProvider reads data.
+                         # Ah, scripts download data there?
+                         # But here we are in verify phase.
+                         # If we are verifying, we expect data to be present.
+                         # Creating empty dir seems useless unless some other tool populates it later?
+                         # But we are initializing provider immediately after.
+                         # I will skip creation for now as we are dealing with multiple dirs.
+                         # If the user provided a dir and it doesn't exist, we skip it here.
+                         pass
+                    else:
+                        kursliste_manager_verify.load_directory(k_dir)
                 
                 # Verify that Kursliste data exists for the required tax year
                 required_tax_year_verify = statement.taxPeriod if statement.taxPeriod else parsed_period_to.year
-                kursliste_manager_verify.ensure_year_available(required_tax_year_verify, kursliste_dir)
+                kursliste_manager_verify.ensure_year_available(required_tax_year_verify, preferred_dir_for_error_verify)
                 
                 exchange_rate_provider_verify = KurslisteExchangeRateProvider(kursliste_manager_verify)
             except Exception as e:
-                raise ValueError(f"Failed to initialize KurslisteExchangeRateProvider for verification with directory {kursliste_dir}: {e}")
+                checked_dirs_v = ", ".join([str(d) for d in kursliste_dirs_verify])
+                raise ValueError(f"Failed to initialize KurslisteExchangeRateProvider for verification with directories {checked_dirs_v}: {e}")
             
             tax_value_verifier: Optional[MinimalTaxValueCalculator] = None
             verifier_name = ""
@@ -570,6 +628,15 @@ def main(
 
             dump_debug_model(current_phase.value, statement)
 
+        if Phase.VALIDATE in run_phases:
+            current_phase = Phase.VALIDATE
+            print(f"Phase: {current_phase.value}")
+            if not statement:
+                 raise ValueError("TaxStatement model not loaded. Cannot run validate phase.")
+            statement.validate_model()
+            print(f"Validation successful.")
+            dump_debug_model(current_phase.value, statement)
+
         if Phase.RENDER in run_phases:
             current_phase = Phase.RENDER
             print(f"Phase: {current_phase.value}")
@@ -588,10 +655,16 @@ def main(
                 if not isinstance(org_nr, str) or not org_nr.isdigit() or len(org_nr) != 5:
                     raise ValueError(f"Invalid --org-nr '{org_nr}': Must be a 5-digit string.")
             
+            # Determine the path for the main tax statement PDF
+            # If we are merging, render to a temp file first
+            main_pdf_path = output_file
+            if pre_amble or post_amble:
+                main_pdf_path = output_file.with_suffix(".tmp_main.pdf")
+
             # Use the render_tax_statement function to generate the PDF
             rendered_path = render_tax_statement(
                 statement,
-                output_file,
+                main_pdf_path,
                 override_org_nr=org_nr,
                 minimal_frontpage_placeholder=(
                     (tax_calculation_level == TaxCalculationLevel.MINIMAL)
@@ -603,6 +676,50 @@ def main(
                 ),
             )
             print(f"Rendering successful to {rendered_path}")
+
+            if pre_amble or post_amble:
+                # Validate all pre/post amble files before starting the merge
+                all_amble_files = list(pre_amble or []) + list(post_amble or [])
+                for path in all_amble_files:
+                    if not path.exists():
+                        print(f"Error: PDF file not found: {path}")
+                        raise typer.Exit(code=1)
+                    try:
+                        PdfReader(path)
+                    except Exception:
+                        print(f"Error: File is not a valid PDF: {path}")
+                        raise typer.Exit(code=1)
+
+                try:
+                    merger = PdfWriter()
+
+                    if pre_amble:
+                        print(f"Prepending {len(pre_amble)} document(s)...")
+                        for path in pre_amble:
+                            merger.append(path)
+
+                    merger.append(rendered_path)
+
+                    if post_amble:
+                        print(f"Appending {len(post_amble)} document(s)...")
+                        for path in post_amble:
+                            merger.append(path)
+
+                    # Write the final merged PDF directly to the output file
+                    merger.write(output_file)
+                    merger.close()
+                    print(f"Successfully merged pre/post-ambles into {output_file}")
+
+                except Exception as e:
+                    print(f"Error during PDF concatenation: {e}")
+                    raise typer.Exit(code=1)
+                finally:
+                    # Cleanup the temporary main PDF
+                    if rendered_path.exists():
+                        try:
+                            rendered_path.unlink()
+                        except Exception as e:
+                            print(f"Warning: Failed to delete temporary file {rendered_path}: {e}")
 
         if final_xml_path:
             try:

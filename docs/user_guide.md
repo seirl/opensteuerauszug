@@ -39,7 +39,7 @@ Using OpenSteuerAuszug to generate your Steuerauszug generally involves the foll
     *   Optionally, convert the Kursliste XML into an SQLite database for faster processing.
     *   Prepare your bank/broker statements in the required format.
     *   Please also keep all the normal human readable statements for validation and later referral.
-    *   Configure OpenSteuerAuszug by creating and customizing a `config.toml` file with your personal details and account information.
+    *   Configure OpenSteuerAuszug by creating and customizing a `config.toml` file with your personal details and account information. This file usually lives in `~/.config/opensteuerauszug/config.toml` (or `config.toml` in the current directory).
 
 2.  **Importing Data**:
     *   Use OpenSteuerAuszug to import your financial data from your bank or broker. Specific instructions for each supported institution are provided in separate documents (see section "Importing Data from Brokers").
@@ -81,6 +81,27 @@ You can explicitly control this feature using:
 *   `--payment-reconciliation`: (Default) Enables the reconciliation phase and reports.
 *   `--no-payment-reconciliation`: Skips the reconciliation step.
 
+### Appending Additional Documents
+
+Often, you may want to include additional supporting documents (e.g., the original broker statement, US 1042-S forms, or other tax forms) in the same PDF as your Steuerauszug for archiving or submission purposes.
+
+OpenSteuerAuszug provides command-line options to prepend or append existing PDF files to the generated tax statement:
+
+*   `--pre-amble <file.pdf>`: Adds the specified PDF **before** the main tax statement.
+*   `--post-amble <file.pdf>`: Adds the specified PDF **after** the main tax statement.
+
+You can specify these options multiple times to add multiple files. The files will be added in the order they appear on the command line.
+
+**Note:** This feature performs a "naive concatenation." The added pages are attached exactly as they are; no page numbers, barcodes, or headers/footers are added or modified on these external documents.
+
+Example:
+```bash
+python -m opensteuerauszug.steuerauszug input.xml --importer ibkr \
+  --post-amble 1042-S_form.pdf \
+  --post-amble broker_statement.pdf \
+  -o final_tax_statement.pdf
+```
+
 ## Disclaimer and User Responsibility
 
 **Important**: OpenSteuerAuszug is provided "as is" without any formal audit or warranty. While it aims to be accurate, it is your responsibility as the taxpayer to:
@@ -99,13 +120,35 @@ The **Kursliste** is an official list published annually by the Swiss Federal Ta
 
 ### Obtaining the Kursliste
 
-You need to obtain the official Kursliste XML file for the relevant tax year. This is usually available for download from the [ESTV website](https://www.ictax.admin.ch/extern/en.html#/xml). Always down the latest file marked "Initial" in the latest format, V2.0 at this time). 
+You need the official Kursliste XML file for the relevant tax year.
 
-After unzipping, the file is typically named something like `kursliste_JJJJ.xml` (e.g., `kursliste_2023.xml`).
+#### Automated Download (Recommended)
+
+OpenSteuerAuszug can automatically download and prepare the latest Kursliste for you:
+
+```bash
+python -m opensteuerauszug.kursliste download --year 2024
+```
+
+This command will fetch the latest "Initial" export in the best available format directly from the ESTV API and place it into `data/kursliste/kursliste_2024.xml`.
+
+#### Manual Download
+
+Alternatively, you can obtain the file manually:
+
+1. Visit the [ESTV website](https://www.ictax.admin.ch/extern/en.html#/xml).
+2. Download the latest file marked "Initial" for the relevant tax year (usually in the latest format, e.g., V2.2).
+3. Unzip the file. It is typically named something like `kursliste_JJJJ.xml` (e.g., `kursliste_2023.xml`).
+4. Place the XML file into the `data/kursliste/` directory.
 
 ### Storing the Kursliste
 
-Place the downloaded Kursliste XML file(s) into the `data/kursliste/` directory within your OpenSteuerAuszug project. The application will automatically detect files in this location.
+You should place the downloaded Kursliste XML file(s) where the application can find them. The recommended default location is:
+
+*   **Linux/Unix**: `~/.local/share/opensteuerauszug/kursliste/`
+*   **Alternative**: `data/kursliste/` (relative to where you run the command)
+
+The application will automatically detect files in these locations.
 
 For more detailed information on naming conventions and how OpenSteuerAuszug manages these files, please refer to the [Kursliste Data Management Guide](data/kursliste/kursliste.md).
 
@@ -117,15 +160,16 @@ For significantly improved performance, especially with large Kursliste files or
 1.  Navigate to the root directory of the OpenSteuerAuszug project in your terminal.
 2.  Run the conversion script:
     ```bash
-    python scripts/convert_kursliste_to_sqlite.py path/to/your/downloaded/kursliste_YYYY.xml data/kursliste/kursliste_YYYY.sqlite
+    python scripts/convert_kursliste_to_sqlite.py path/to/your/downloaded/kursliste_YYYY.xml ~/.local/share/opensteuerauszug/kursliste/kursliste_YYYY.sqlite
     ```
-    Replace `path/to/your/downloaded/kursliste_YYYY.xml` with the actual path to the XML file you downloaded from ESTV, and `kursliste_YYYY.sqlite` with the desired output name (keeping the year consistent).
+    Replace `path/to/your/downloaded/kursliste_YYYY.xml` with the actual path to the XML file you downloaded from ESTV, and the second argument with your desired output path (e.g., in the standard data directory).
 
     **Example:**
     ```bash
-    python scripts/convert_kursliste_to_sqlite.py ~/Downloads/kursliste_2023.xml data/kursliste/kursliste_2023.sqlite
+    mkdir -p ~/.local/share/opensteuerauszug/kursliste/
+    python scripts/convert_kursliste_to_sqlite.py ~/Downloads/kursliste_2023.xml ~/.local/share/opensteuerauszug/kursliste/kursliste_2023.sqlite
     ```
-3.  Ensure the generated `.sqlite` file is in the `data/kursliste/` directory.
+3.  Ensure the generated `.sqlite` file is in the data directory.
 
 The application will then use this SQLite database for faster access to Kursliste data. For more technical details on the conversion process and database structure, see the [Kursliste Data Management Guide](data/kursliste/kursliste.md).
 
@@ -145,10 +189,17 @@ To generate a Steuerauszug, you will need to provide the following:
 
 ### Configuring OpenSteuerAuszug (`config.toml`)
 
-The `config.toml` file is optional. It allows tailoring OpenSteuerAuszug to your needs, for example if you want to correct or extend broker exported data. To set it up:
+The `config.toml` file is optional but recommended. It allows tailoring OpenSteuerAuszug to your needs, for example if you want to correct or extend broker exported data.
 
-1. Copy the template: `cp config.template.toml config.toml`
-2. Edit the file with your personal information
+**Where to put it:**
+*   **Recommended**: `~/.config/opensteuerauszug/config.toml` (User configuration directory)
+*   **Alternative**: `config.toml` (Current working directory)
+
+To set it up:
+
+1.  Create the config directory: `mkdir -p ~/.config/opensteuerauszug`
+2.  Copy the template: `cp config.template.toml ~/.config/opensteuerauszug/config.toml`
+3.  Edit the file with your personal information
 
 The configuration uses a hierarchical structure:
 
