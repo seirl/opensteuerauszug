@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Union # Union will be removed from self
 from opensteuerauszug.model.kursliste import Kursliste, Security, Payment  # Added Payment for type hint
 from .kursliste_db_reader import KurslisteDBReader
 from .kursliste_accessor import KurslisteAccessor # Added import
-
+from .kursliste_downloader import download_kursliste_xml # Added import
 
 class KurslisteManager:
     """
@@ -87,6 +87,12 @@ class KurslisteManager:
         """
         directory = Path(directory_path)
         if not directory.exists() or not directory.is_dir():
+            # If the directory doesn't exist yet (e.g. fresh XDG install), we can't load from it.
+            # But this is not necessarily an error if we intend to download later.
+            # However, for 'load_directory' which implies 'read existing', it's standard to complain or do nothing.
+            # Given the new flow, raising ValueError might be too strict if we just want to say "nothing here yet".
+            # But let's keep it strict for 'load' and rely on 'ensure' to handle the missing case.
+            # Actually, the caller (steuerauszug.py) now checks existence before calling load_directory.
             raise ValueError(f"Directory does not exist or is not a directory: {directory}")
 
         potential_files = list(directory.glob("*.xml")) + list(directory.glob("*.sqlite"))
@@ -221,24 +227,45 @@ class KurslisteManager:
     def ensure_year_available(self, required_year: int, kursliste_dir: Optional[Path] = None) -> None:
         """
         Validate that Kursliste data is available for the required year.
-        Raises a clear error if the year is not available.
+        If data is missing and kursliste_dir is provided, attempt to download it.
         
         Args:
             required_year: The tax year that must be available
-            kursliste_dir: Optional directory path to include in error message
+            kursliste_dir: Optional directory path to include in error message or to download to.
             
         Raises:
-            ValueError: If the required year is not available with helpful error message
+            ValueError: If the required year is not available and download fails or is not possible.
         """
         available_years = self.get_available_years()
         if required_year not in available_years:
-            available_years_str = ", ".join(str(y) for y in available_years) if available_years else "none"
-            dir_info = f" in {kursliste_dir}" if kursliste_dir else ""
-            raise ValueError(
-                f"Kursliste data for tax year {required_year} not found. "
-                f"Available years: {available_years_str}. "
-                f"Please ensure kursliste_{required_year}.sqlite or kursliste_{required_year}.xml exists{dir_info}"
-            )
+            # Attempt download if configured
+            if kursliste_dir:
+                print(f"Kursliste for year {required_year} not found in loaded data. Attempting download to {kursliste_dir}...")
+                downloaded_file = download_kursliste_xml(required_year, kursliste_dir)
+                if downloaded_file and downloaded_file.exists():
+                    print(f"Download successful. Loading downloaded file...")
+                    try:
+                        # Load just this file to update the manager state
+                        # We use load_directory which scans everything, but it's safe.
+                        # Optimization: could just parse this one file.
+                        self.load_directory(kursliste_dir)
+                        if required_year in self.get_available_years():
+                            return # Success
+                    except Exception as e:
+                        print(f"Error loading downloaded file: {e}")
+                else:
+                    print("Download failed or file not found after download attempt.")
+
+            # Check again
+            available_years = self.get_available_years()
+            if required_year not in available_years:
+                available_years_str = ", ".join(str(y) for y in available_years) if available_years else "none"
+                dir_info = f" in {kursliste_dir}" if kursliste_dir else ""
+                raise ValueError(
+                    f"Kursliste data for tax year {required_year} not found. "
+                    f"Available years: {available_years_str}. "
+                    f"Please ensure kursliste_{required_year}.sqlite or kursliste_{required_year}.xml exists{dir_info}, or check internet connection for download."
+                )
         
     def get_security_price(self, tax_year: int, isin: str, price_date: Optional[datetime.date] = None) -> Optional[Decimal]:
         """

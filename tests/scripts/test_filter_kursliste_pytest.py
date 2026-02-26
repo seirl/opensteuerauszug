@@ -12,7 +12,9 @@ from opensteuerauszug.model.kursliste import Kursliste as KurslisteModel
 
 # Add the script's directory to sys.path to allow direct import
 SCRIPTS_DIR = Path(__file__).parent.parent.parent / "scripts"
-sys.path.insert(0, str(SCRIPTS_DIR.parent))  # Add project root to import opensteuerauszug
+# Add src to sys.path to allow importing opensteuerauszug
+PROJECT_ROOT = SCRIPTS_DIR.parent
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 # Path to the script to be tested
 FILTER_KURSLISTE_SCRIPT = SCRIPTS_DIR / "filter_kursliste.py"
@@ -93,7 +95,11 @@ def run_script(temp_dir, args_list):
     
     print(f"Running command: {' '.join(cmd)}")  # For debugging tests
     
-    result = run(cmd, capture_output=True, text=True, encoding='utf-8')
+    # Ensure PYTHONPATH includes src so the script can find the package
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(PROJECT_ROOT / "src") + os.pathsep + env.get("PYTHONPATH", "")
+
+    result = run(cmd, capture_output=True, text=True, encoding='utf-8', env=env)
 
     print(f"Command completed with return code {result.returncode}")
     print(f"Stdout:\n{result.stdout}")

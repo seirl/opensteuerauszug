@@ -7,6 +7,7 @@ from typing import List, Optional
 from datetime import date, datetime
 
 from opensteuerauszug.config.models import SchwabAccountSettings, IbkrAccountSettings, GeneralSettings # Added GeneralSettings
+from opensteuerauszug.config.paths import get_config_search_paths, get_kursliste_search_paths, get_identifiers_search_paths, get_xdg_data_home # Added Path helpers
 import os # For path construction
 from .core.identifier_loader import SecurityIdentifierMapLoader
 
@@ -62,6 +63,48 @@ class LogLevel(str, Enum):
 
 default_phases = [Phase.IMPORT, Phase.VALIDATE, Phase.CALCULATE, Phase.RECONCILE_PAYMENTS, Phase.RENDER]
 
+def resolve_kursliste_dirs(cli_arg: Optional[Path]) -> List[Path]:
+    """
+    Resolves the list of Kursliste directories to load.
+
+    Logic:
+    1. If cli_arg is provided, use ONLY that (even if it doesn't exist yet,
+       to allow for creation/download).
+    2. If no cli_arg, search using standard search paths (XDG, Local).
+    3. If search yields existing directories, return them.
+    4. If search yields NOTHING (fresh install), return the default XDG path
+       and ensure its parent structure exists.
+    """
+    if cli_arg:
+        if not cli_arg.exists():
+            logger.warning(f"User-provided Kursliste directory '{cli_arg}' does not exist. It may be created during download.")
+        else:
+            logger.info(f"Using user-provided Kursliste directory: {cli_arg}")
+        return [cli_arg]
+
+    # Search for existing data
+    found_dirs = [d for d in get_kursliste_search_paths() if d.exists()]
+
+    if found_dirs:
+        logger.info(f"Using Kursliste directories found in search paths: {', '.join(str(d) for d in found_dirs)}")
+        return found_dirs
+
+    # Fallback for fresh install: Default to XDG
+    xdg_kursliste_dir = get_xdg_data_home() / "kursliste"
+    logger.info(f"No existing Kursliste directories found. Defaulting to XDG path: {xdg_kursliste_dir}")
+
+    # Ensure the parent directory exists so that if we try to write to it later, it works.
+    # Note: KurslisteManager currently expects the *directory* passed to load_directory to exist
+    # if it's going to load from it. But for ensure_year_available, it might need a target.
+    # We create the directory here to be safe and avoid "directory does not exist" errors
+    # during initial loading attempts, even if empty.
+    try:
+        xdg_kursliste_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logger.warning(f"Could not create default Kursliste directory '{xdg_kursliste_dir}': {e}")
+
+    return [xdg_kursliste_dir]
+
 @app.command()
 def main(
     input_file: Path = typer.Argument(..., exists=True, file_okay=True, dir_okay=True, readable=True, help="Input file (specific format depends on importer, or XML for raw) or directory (for Schwab importer)."),
@@ -77,16 +120,16 @@ def main(
     identifiers_csv_path_opt: Optional[str] = typer.Option(
         None,
         "--identifiers-csv-path",
-        help="Path to the security identifiers CSV file (e.g., data/my_identifiers.csv). If not provided, defaults to 'data/security_identifiers.csv' relative to the project root."
+        help="Path to the security identifiers CSV file. If not provided, searches in XDG config home and local 'data/' directory."
     ),
     strict_consistency_flag: bool = typer.Option(True, "--strict-consistency/--no-strict-consistency", help="Enable/disable strict consistency checks in importers (e.g., Schwab). Defaults to strict."),
     filter_to_period_flag: bool = typer.Option(True, "--filter-to-period/--no-filter-to-period", help="Filter transactions and stock events to the tax period (with closing balances). Defaults to enabled."),
     tax_calculation_level: TaxCalculationLevel = typer.Option(TaxCalculationLevel.KURSLISTE, "--tax-calculation-level", help="Specify the level of detail for tax value calculations."),
     log_level: LogLevel = typer.Option(LogLevel.INFO, "--log-level", help="Set the log level for console output."),
-    config_file: Path = typer.Option("config.toml", "--config", "-c", help="Path to the configuration TOML file."),
+    config_file: Optional[Path] = typer.Option(None, "--config", "-c", help="Path to the configuration TOML file. If not provided, searches in XDG config home and local directory."),
     broker_name: Optional[str] = typer.Option(None, "--broker", help="Broker name (e.g., 'schwab') from config.toml to use for this run."),
     override_configs: List[str] = typer.Option(None, "--set", help="Override configuration settings using path.to.key=value format. Can be used multiple times."),
-    kursliste_dir: Path = typer.Option(Path("data/kursliste"), "--kursliste-dir", help="Directory containing Kursliste XML files for exchange rate information. Defaults to 'data/kursliste'."),
+    kursliste_dir: Optional[Path] = typer.Option(None, "--kursliste-dir", help="Directory containing Kursliste XML files for exchange rate information. If not provided, searches in XDG data home and local 'data/kursliste' directory."),
     org_nr: Optional[str] = typer.Option(None, "--org-nr", help="Override the organization number used in barcodes (5-digit number)"),
     payment_reconciliation: bool = typer.Option(True, "--payment-reconciliation/--no-payment-reconciliation", help="Run optional payment reconciliation between Kursliste and broker evidence."),
 ):
@@ -164,9 +207,22 @@ def main(
     # ... (rest of date printing)
 
     # --- Configuration Loading ---
+    resolved_config_path: Path
+    if config_file:
+        resolved_config_path = config_file
+    else:
+        # Default to local config.toml if no other path found, for backwards compatibility/warning behavior
+        resolved_config_path = Path("config.toml")
+        for path in get_config_search_paths():
+            if path.exists():
+                resolved_config_path = path
+                break
+
+    logger.debug(f"Using configuration file: {resolved_config_path}")
+
     all_schwab_account_settings_models: List[SchwabAccountSettings] = []
     all_ibkr_account_settings_models: List[IbkrAccountSettings] = [] # New list for IBKR
-    config_manager = ConfigManager(config_file_path=str(config_file))
+    config_manager = ConfigManager(config_file_path=str(resolved_config_path))
     
     # Extract general configuration settings for CleanupCalculator
     general_config_settings: Optional[GeneralSettings] = None
@@ -203,7 +259,7 @@ def main(
 
     if target_broker_kind_for_config_loading:
         try:
-            logger.debug(f"Loading all account configurations for broker kind '{target_broker_kind_for_config_loading}' from '{config_file}'...")
+            logger.debug(f"Loading all account configurations for broker kind '{target_broker_kind_for_config_loading}' from '{resolved_config_path}'...")
             if override_configs:
                 logger.debug(f"Applying CLI overrides: {override_configs}")
 
@@ -213,7 +269,7 @@ def main(
             )
             
             if not concrete_accounts_list:
-                print(f"No accounts configured for broker kind '{target_broker_kind_for_config_loading}' in {config_file}. Importer will proceed with defaults if possible.")
+                print(f"No accounts configured for broker kind '{target_broker_kind_for_config_loading}' in {resolved_config_path}. Importer will proceed with defaults if possible.")
 
             for acc_settings in concrete_accounts_list:
                 if acc_settings.kind == "schwab":
@@ -375,26 +431,32 @@ def main(
             if not parsed_period_from or not parsed_period_to:
                 raise ValueError("Both --period-from and --period-to must be specified for the calculate phase.")
             
-            effective_identifiers_csv_path: str
-            if identifiers_csv_path_opt is None:
-                cli_py_file_path = os.path.abspath(__file__)
-                src_opensteuerauszug_dir = os.path.dirname(cli_py_file_path)
-                src_dir = os.path.dirname(src_opensteuerauszug_dir)
-                project_root_dir = os.path.dirname(src_dir)
-                effective_identifiers_csv_path = os.path.join(project_root_dir, "data", "security_identifiers.csv")
-                logger.debug(f"Using default security identifiers CSV path: {effective_identifiers_csv_path}")
-            else:
+            effective_identifiers_csv_path: Optional[str] = None
+            if identifiers_csv_path_opt:
                 effective_identifiers_csv_path = identifiers_csv_path_opt
                 logger.debug(f"Using user-provided security identifiers CSV path: {effective_identifiers_csv_path}")
-
-            print(f"Attempting to load security identifiers from: {effective_identifiers_csv_path}")
-            identifier_loader = SecurityIdentifierMapLoader(effective_identifiers_csv_path)
-            security_identifier_map = identifier_loader.load_map()
-
-            if security_identifier_map:
-                print(f"Successfully loaded {len(security_identifier_map)} security identifiers.")
             else:
-                print("Security identifier map not loaded or empty. Enrichment will be skipped.")
+                for path in get_identifiers_search_paths():
+                    if path.exists():
+                        effective_identifiers_csv_path = str(path)
+                        logger.debug(f"Found security identifiers CSV at: {effective_identifiers_csv_path}")
+                        break
+
+                if not effective_identifiers_csv_path:
+                    logger.debug("No security identifiers CSV file found in search paths. Enrichment will be skipped.")
+
+            security_identifier_map = {}
+            if effective_identifiers_csv_path:
+                print(f"Attempting to load security identifiers from: {effective_identifiers_csv_path}")
+                identifier_loader = SecurityIdentifierMapLoader(effective_identifiers_csv_path)
+                security_identifier_map = identifier_loader.load_map()
+
+                if security_identifier_map:
+                    print(f"Successfully loaded {len(security_identifier_map)} security identifiers.")
+                else:
+                    print("Security identifier map not loaded or empty. Enrichment will be skipped.")
+            else:
+                print("No security identifiers file provided or found. Enrichment will be skipped.")
             
             print("Running CleanupCalculator...")
             cleanup_calculator = CleanupCalculator(
@@ -410,20 +472,40 @@ def main(
             dump_debug_model(current_phase.value + "_after_cleanup", statement) # Optional intermediate dump
 
             exchange_rate_provider: ExchangeRateProvider
-            print(f"Using KurslisteExchangeRateProvider with directory: {kursliste_dir}")
+
+            resolved_kursliste_dirs = resolve_kursliste_dirs(kursliste_dir)
+
             try:
-                if not kursliste_dir.exists():
-                    print(f"Warning: Kursliste directory {kursliste_dir} does not exist")
                 kursliste_manager = KurslisteManager()
-                kursliste_manager.load_directory(kursliste_dir)
+                # Load all resolved directories
+                # If a directory doesn't exist, KurslisteManager might complain if we try to load it.
+                # However, resolved_kursliste_dirs now guarantees returning *something* (XDG default) if nothing exists.
+                # If we have [XDG_DIR] and it's empty, loading effectively does nothing but sets up the potential for download.
                 
-                # Verify that Kursliste data exists for the required tax year
+                for k_dir in resolved_kursliste_dirs:
+                    if k_dir.exists():
+                        kursliste_manager.load_directory(k_dir)
+                    else:
+                        # This case is hit if user provided a non-existent dir, or if we defaulted to XDG and it's fresh/empty.
+                        # We don't load from it (it's empty), but we keep it in mind for 'ensure_year_available'.
+                        pass
+
+                # Verify that Kursliste data exists for the required tax year (check at least one source provided it)
                 required_tax_year = parsed_period_to.year
-                kursliste_manager.ensure_year_available(required_tax_year, kursliste_dir)
+
+                # We pass the PRIMARY directory (first one) as the hint for where to look/download if missing.
+                # If resolved_kursliste_dirs has entries, the first one is the preferred location.
+                primary_kursliste_dir = resolved_kursliste_dirs[0] if resolved_kursliste_dirs else None
+
+                kursliste_manager.ensure_year_available(required_tax_year, primary_kursliste_dir)
                 
                 exchange_rate_provider = KurslisteExchangeRateProvider(kursliste_manager)
             except Exception as e:
-                raise ValueError(f"Failed to initialize KurslisteExchangeRateProvider with directory {kursliste_dir}: {e}")
+                # If we have no resolved dirs, ensure_year_available will likely fail if it checks availability.
+                # Let's provide a clear error if no dirs were found/provided.
+                if not resolved_kursliste_dirs:
+                     print("Error: No valid Kursliste directories found. Cannot proceed with tax value calculation using Kursliste.")
+                raise ValueError(f"Failed to initialize KurslisteExchangeRateProvider: {e}")
             
             tax_value_calculator: Optional[MinimalTaxValueCalculator] = None
             calculator_name = ""
@@ -468,22 +550,25 @@ def main(
                  raise ValueError("TaxStatement model not loaded. Cannot run calculate phase.")
             
             print(f"Verifying with tax calculation level: {tax_calculation_level.value}...")
-            exchange_rate_provider_verify: ExchangeRateProvider
-            print(f"Using KurslisteExchangeRateProvider with directory: {kursliste_dir} for verification")
+
+            resolved_kursliste_dirs_verify = resolve_kursliste_dirs(kursliste_dir)
+            print(f"Using KurslisteExchangeRateProvider with directories: {', '.join(str(d) for d in resolved_kursliste_dirs_verify)} for verification")
+
             try:
-                if not kursliste_dir.exists():
-                    print(f"Warning: Kursliste directory {kursliste_dir} does not exist for verification.")
-                    kursliste_dir.mkdir(parents=True, exist_ok=True)
                 kursliste_manager_verify = KurslisteManager()
-                kursliste_manager_verify.load_directory(kursliste_dir)
+                for k_dir in resolved_kursliste_dirs_verify:
+                    if k_dir.exists():
+                        kursliste_manager_verify.load_directory(k_dir)
                 
                 # Verify that Kursliste data exists for the required tax year
                 required_tax_year_verify = statement.taxPeriod if statement.taxPeriod else parsed_period_to.year
-                kursliste_manager_verify.ensure_year_available(required_tax_year_verify, kursliste_dir)
+                primary_kursliste_dir_verify = resolved_kursliste_dirs_verify[0] if resolved_kursliste_dirs_verify else None
+
+                kursliste_manager_verify.ensure_year_available(required_tax_year_verify, primary_kursliste_dir_verify)
                 
                 exchange_rate_provider_verify = KurslisteExchangeRateProvider(kursliste_manager_verify)
             except Exception as e:
-                raise ValueError(f"Failed to initialize KurslisteExchangeRateProvider for verification with directory {kursliste_dir}: {e}")
+                raise ValueError(f"Failed to initialize KurslisteExchangeRateProvider for verification: {e}")
             
             tax_value_verifier: Optional[MinimalTaxValueCalculator] = None
             verifier_name = ""
