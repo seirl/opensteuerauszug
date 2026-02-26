@@ -2017,7 +2017,7 @@ SAMPLE_IBKR_FLEX_XML_WHTAX_NO_SECURITY = """
 def test_withholding_tax_without_security_creates_bank_payment(sample_ibkr_settings):
     """Withholding tax not linked to a security (e.g. yield enhancement) should
     fall through to create a BankAccountPayment instead of raising ValueError."""
-  
+
     period_from = date(2025, 1, 1)
     period_to = date(2025, 12, 31)
 
@@ -2026,7 +2026,7 @@ def test_withholding_tax_without_security_creates_bank_payment(sample_ibkr_setti
         period_to=period_to,
         account_settings_list=sample_ibkr_settings,
     )
-    
+
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".xml") as tmp_file:
         tmp_file.write(SAMPLE_IBKR_FLEX_XML_WHTAX_NO_SECURITY)
         xml_file_path = tmp_file.name
@@ -2158,8 +2158,8 @@ def test_trade_unit_price_none_when_zero(sample_ibkr_settings):
             os.remove(xml_file_path)
 
 
-        
-        
+
+
 def test_trade_unit_price_various_nonzero_and_zero_prices(sample_ibkr_settings):
     """Test that unitPrice is correctly set for various trade prices including zero."""
     period_from = date(2025, 1, 1)
@@ -2229,4 +2229,3 @@ def test_trade_unit_price_various_nonzero_and_zero_prices(sample_ibkr_settings):
     finally:
         if os.path.exists(xml_file_path):
             os.remove(xml_file_path)
-

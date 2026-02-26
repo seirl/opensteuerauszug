@@ -551,4 +551,3 @@ class CleanupCalculator:
             logger.info("Cleanup calculation finished. No data was modified.") # Adjusted log
         return statement
 
-

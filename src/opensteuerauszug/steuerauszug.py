@@ -428,9 +428,15 @@ def main(
 
             try:
                 kursliste_manager = KurslisteManager()
+                # Ensure the preferred directory is in the list of dirs to load if it exists
+                # logic in resolve_kursliste_dirs already handles this for XDG and local data.
+                # If the user strictly provided kursliste_dir, it's there.
+
                 for k_dir in kursliste_dirs_to_load:
                     if not k_dir.exists():
-                        print(f"Warning: Kursliste directory {k_dir} does not exist (skipping)")
+                        # Don't warn for default XDG paths that don't exist yet, as it's noisy on fresh install
+                        if k_dir != get_xdg_data_home() / "opensteuerauszug" / "kursliste":
+                             print(f"Warning: Kursliste directory {k_dir} does not exist (skipping)")
                         continue
                     print(f"Loading Kursliste data from: {k_dir}")
                     kursliste_manager.load_directory(k_dir)
@@ -441,6 +447,17 @@ def main(
                 
                 exchange_rate_provider = KurslisteExchangeRateProvider(kursliste_manager)
             except Exception as e:
+                # If ensuring year available failed, it means data is missing.
+                # The ensure_year_available raises ValueError with a helpful message.
+                # We catch general Exception here which might mask it or wrap it.
+                # But typically ensure_year_available raises ValueError.
+                # The message should guide the user.
+
+                # Check if it was indeed the ensure_year_available that failed
+                if "Kursliste data for tax year" in str(e):
+                     # Re-raise nicely
+                     raise e
+
                 checked_dirs = ", ".join([str(d) for d in kursliste_dirs_to_load])
                 raise ValueError(f"Failed to initialize KurslisteExchangeRateProvider with directories {checked_dirs}: {e}")
             
